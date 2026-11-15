@@ -55,3 +55,12 @@ and bad devicespecs.
 
 CPCSyntaxError (the kit's, with M4 emulation) on Ubuntu 26.04: `make test` passes. Not yet on a
 real CPC + M4.
+
+## Licence
+
+GPL-3.0-or-later, see [LICENSE](LICENSE).
+
+Why GPL and not MIT: the point of this library is that one program builds for the Atari, C64 and
+Apple II with FujiNet's fujinet-lib and for the CPC with this one. fujinet-lib is GPL-3, so those
+programs are GPL-3 on the other machines anyway. The same licence here keeps the CPC version under
+the same terms and lets the code go into the FujiNet project later if that is ever wanted.

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 joergr72idb - see LICENSE */
 /* fujinet-network.h for the Amstrad/Schneider CPC with the M4 board (SDCC).
  *
  * The same function names, constants and behaviour as the network part of FujiNet's

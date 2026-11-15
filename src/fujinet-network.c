@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 joergr72idb - see LICENSE */
 /* fujinet-network for the CPC + M4: see include/fujinet-network.h */
 #include <string.h>
 #include "fujinet-network.h"

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 joergr72idb - see LICENSE */
 /* fntest - tests the fujinet-network layer on the CPC + M4 against test/testserver.py.
  * Each result goes to the screen and over a second connection (N2:) to the test server,
  * which prints a summary. Build: make test SERVER=... PORT=...

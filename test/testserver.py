@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 joergr72idb - see LICENSE
 """Test server for test/fntest.c.
 
     python3 test/testserver.py [port] [timeout_seconds]

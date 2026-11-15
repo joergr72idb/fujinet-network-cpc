@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 joergr72idb - see LICENSE
 # fujinet-network for the CPC + M4 (SDCC): the network part of FujiNet's fujinet-lib on the M4.
 # Uses the CPC development kit (../development-kit-cpc-and-m4: SDCC, lib/cpc, lib/m4, iDSK,
 # CPCSyntaxError); `make DEV=/path/to/kit` for another place.
