@@ -51,6 +51,12 @@ of the connection, 2000 bytes sent in pieces of 1-1400 bytes, a blocking read of
 data, a host name, two units at once, re-opening a unit, a refused connection, an unknown host
 and bad devicespecs.
 
+## Used by
+
+- [Retro Game Battle](https://github.com/joergr72idb/retro-game-battle): its CPC client shares the
+  protocol code (`clients/common/rgb_core.c`) with the Atari, C64 and Apple II clients, which use
+  fujinet-lib. Retro Game Battle carries this library as a git subtree in `lib/fujinet-network-cpc`.
+
 ## Tested (2026-11-15, emulator only)
 
 CPCSyntaxError (the kit's, with M4 emulation) on Ubuntu 26.04: `make test` passes. Not yet on a
