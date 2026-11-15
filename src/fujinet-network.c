@@ -11,6 +11,10 @@
  * the unit's receive buffer, which is unused until the response comes. The response head is
  * read and dropped (only the status code is kept); the body is then read like a TCP stream up
  * to the end of the connection ("Connection: close", so no chunked transfer).
+ *
+ * -DFN_NO_HTTP leaves HTTP out (about 3 KB less): HTTP opens return NOT_IMPLEMENTED as for
+ * other protocols, and the network_http_* functions are not there (a program using them
+ * does not link).
  */
 #include <string.h>
 #include "fujinet-network.h"
@@ -81,6 +85,8 @@ static Unit *open_unit(const char *devicespec)
     }
     return &units[n - 1];
 }
+
+#ifndef FN_NO_HTTP
 
 /* ---- sending text in small pieces ---------------------------------------------------- */
 
@@ -218,18 +224,28 @@ static void start_response(Unit *u)
         finish_request(u, u->rx, u->len);
 }
 
+#else
+#define start_response(u)
+#endif /* FN_NO_HTTP */
+
 /* ---- receiving ------------------------------------------------------------------------ */
 
 /* takes what the M4 has into the unit's buffer, without waiting (HTTP: through the head) */
 static void fill(Unit *u)
 {
-    int r = 0;
+    int r;
 
+#ifndef FN_NO_HTTP
     if (u->state == H_REQUEST)
         return;
     do {
+#endif
         if (u->closed || u->len == FN_RXBUF)
-            break;
+#ifndef FN_NO_HTTP
+            break;                      /* on to the end-of-head check */
+#else
+            return;
+#endif
         if (u->start) {
             memmove(u->rx, u->rx + u->start, u->len);
             u->start = 0;
@@ -239,6 +255,7 @@ static void fill(Unit *u)
             u->closed = 1;
         else
             u->len += r;
+#ifndef FN_NO_HTTP
         if (u->state == H_HEAD)
             head(u);
     } while (u->state == H_HEAD && r > 0);
@@ -248,13 +265,18 @@ static void fill(Unit *u)
         if (u->first)
             u->err = NETWORK_ERROR_GENERAL;
     }
+#endif
 }
 
+#ifndef FN_NO_HTTP
 /* bytes the program can read: the body only */
 static uint16_t avail(const Unit *u)
 {
     return u->state == H_REQUEST || u->state == H_HEAD ? 0 : u->len;
 }
+#else
+#define avail(u) ((u)->len)
+#endif
 
 static void set_status(const Unit *u)
 {
@@ -262,11 +284,13 @@ static void set_status(const Unit *u)
 
     nw_status.avail = n;
     nw_status.status = !u->closed;
+#ifndef FN_NO_HTTP
     if (u->state == H_REQUEST || u->state == H_HEAD)
         nw_status.errcode = NETWORK_SUCCESS;
     else if (u->err != NETWORK_SUCCESS)
         nw_status.errcode = u->err;     /* HTTP error status: stays, as on the FujiNet */
     else
+#endif
         nw_status.errcode = u->closed && !n ? NETWORK_ERROR_END_OF_FILE : NETWORK_SUCCESS;
 }
 
@@ -307,6 +331,7 @@ static uint8_t parse_ip(const char *s, uint8_t *ip)
     return *s == 0;
 }
 
+#ifndef FN_NO_HTTP
 /* the HTTP method of an open mode, or M_TCP when not supported */
 static uint8_t http_method(uint8_t mode)
 {
@@ -324,10 +349,13 @@ static uint8_t http_method(uint8_t mode)
     }
     return M_TCP;
 }
+#endif
 
 FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
 {
+#ifndef FN_NO_HTTP
     static const char *const names[] = { "", "GET ", "POST ", "PUT ", "DELETE " };
+#endif
     char host[64];
     uint8_t ip[4], n, i, s, method;
     uint16_t port;
@@ -347,9 +375,11 @@ FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
         if (mode != OPEN_MODE_READ && mode != OPEN_MODE_WRITE && mode != OPEN_MODE_RW)
             return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
         method = M_TCP;
+#ifndef FN_NO_HTTP
     } else if ((i = prefix(p, "http://")) != 0) {
         if ((method = http_method(mode)) == M_TCP)
             return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
+#endif
     } else                              /* HTTPS, UDP, TNFS, ... */
         return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
     p += i;
@@ -368,7 +398,12 @@ FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
             return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
         for (port = 0; *p >= '0' && *p <= '9'; ++p)
             port = port * 10 + (*p - '0');
-    } else if (method == M_TCP)         /* TCP needs a port */
+    }
+#ifndef FN_NO_HTTP
+    else if (method == M_TCP)           /* TCP needs a port, HTTP has 80 */
+#else
+    else
+#endif
         return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
     if (*p && *p != '/')
         return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
@@ -384,6 +419,7 @@ FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
         return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_CONNECTION_REFUSED);
     }
 
+#ifndef FN_NO_HTTP
     if (method != M_TCP) {              /* request line and standard headers */
         txsock = s;
         txerr = 0;
@@ -408,12 +444,17 @@ FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
             return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_GENERAL);
         }
     }
+#endif
 
     u = &units[n - 1];
     u->sock = s;
     u->closed = 0;
     u->method = method;
+#ifndef FN_NO_HTTP
     u->state = method == M_TCP ? H_NONE : H_REQUEST;
+#else
+    u->state = H_NONE;
+#endif
     u->chan = HTTP_CHAN_MODE_BODY;
     u->err = NETWORK_SUCCESS;
     u->start = u->len = 0;
@@ -473,6 +514,7 @@ static Unit *read_unit(const char *devicespec)
 {
     Unit *u = open_unit(devicespec);
 
+#ifndef FN_NO_HTTP
     if (u) {
         start_response(u);
         if (u->state == H_REQUEST) {    /* still adding headers or POST data */
@@ -480,6 +522,7 @@ static Unit *read_unit(const char *devicespec)
             return 0;
         }
     }
+#endif
     return u;
 }
 
@@ -519,6 +562,7 @@ int16_t network_read(const char *devicespec, void *buf, uint16_t len)
     return (int16_t)got;
 }
 
+#ifndef FN_NO_HTTP
 /* HTTP: a request header ("Name: value", a trailing CR/LF/ATASCII EOL is dropped) */
 static FN_ERR add_header(Unit *u, const uint8_t *buf, uint16_t len)
 {
@@ -540,6 +584,7 @@ static FN_ERR add_data(Unit *u, const uint8_t *buf, uint16_t len)
     u->len += len;
     return FN_ERR_OK;
 }
+#endif
 
 FN_ERR network_write(const char *devicespec, const void *buf, uint16_t len)
 {
@@ -547,6 +592,7 @@ FN_ERR network_write(const char *devicespec, const void *buf, uint16_t len)
 
     if (!u)
         return FN_ERR_IO_ERROR;
+#ifndef FN_NO_HTTP
     if (u->method != M_TCP) {
         if (u->state != H_REQUEST)      /* the request is out: only reading now */
             return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_READ_ONLY);
@@ -556,11 +602,13 @@ FN_ERR network_write(const char *devicespec, const void *buf, uint16_t len)
             return add_data(u, buf, len);
         return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_COMMAND);
     }
+#endif
     if (m4_send(u->sock, buf, len) != 0)
         return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_GENERAL);
     return FN_ERR_OK;
 }
 
+#ifndef FN_NO_HTTP
 /* ---- HTTP calls ----------------------------------------------------------------------- */
 
 FN_ERR network_http_set_channel_mode(const char *devicespec, uint8_t mode)
@@ -612,3 +660,4 @@ FN_ERR network_http_post(const char *devicespec, const char *data)
 {
     return network_http_post_bin(devicespec, (const uint8_t *)data, strlen(data));
 }
+#endif /* FN_NO_HTTP */

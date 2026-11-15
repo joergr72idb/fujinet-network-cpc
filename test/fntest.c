@@ -147,6 +147,7 @@ static void t4(void)
     network_close(spec);
 }
 
+#ifndef FN_NO_HTTP
 /* ---- HTTP (the test server's HTTP port is SERVER_PORT + 2) ---- */
 
 static void hspec(const char *path)
@@ -293,6 +294,7 @@ static void http_tests(void)
     report("H-collect", fn_network_error == NETWORK_ERROR_NOT_IMPLEMENTED, d);
     network_close(spec);
 }
+#endif
 
 static void expect(const char *name, const char *s, uint8_t mode, uint8_t trans, FN_ERR want, uint8_t code)
 {
@@ -332,7 +334,12 @@ int main(void)
            FN_ERR_IO_ERROR, NETWORK_ERROR_NETWORK_UNREACHABLE);
     expect("unit5", "N5:TCP://127.0.0.1:80/", OPEN_MODE_RW, OPEN_TRANS_NONE,
            FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
+#ifndef FN_NO_HTTP
     http_tests();
+#else
+    expect("no-http", "N1:HTTP://127.0.0.1/", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE,
+           FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
+#endif
     expect("https", "N1:HTTPS://127.0.0.1/", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE,
            FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
     expect("http-put8", "N1:HTTP://127.0.0.1/", OPEN_MODE_HTTP_PUT, OPEN_TRANS_NONE,

@@ -58,8 +58,10 @@ PUT of everything written until close (`OPEN_MODE_HTTP_PUT`), other protocols (T
 listening for connections, UDP, translation modes other than `OPEN_TRANS_NONE`, JSON. They
 return `FN_ERR_BAD_CMD` (or `FN_ERR_IO_ERROR`) with `fn_network_error` = 146 (not implemented).
 
-Size: the library adds about 3 KB to a program with HTTP and the M4 library code
-(`RGBTCP.BIN` of Retro Game Battle: 8.8 KB with the TCP-only version, 11.9 KB with this one).
+Size: HTTP costs about 2.9 KB. A program that only needs TCP compiles the library with
+`-DFN_NO_HTTP` (`make NO_HTTP=1` here): HTTP opens then return "not implemented" as before, and
+the `network_http_*` functions are left out, so a program that uses them does not link.
+Retro Game Battle's CPC client `RGBTCP.BIN`: 11.9 KB with HTTP, 9.1 KB with `-DFN_NO_HTTP`.
 
 ## Build and test
 
@@ -68,10 +70,11 @@ Needs the CPC development kit next to this folder (its setup script run).
 ```sh
 make            # build/fujinet-network.rel + build/m4.rel
 make test       # test program FNTEST in the kit's emulator against test/testserver.py: PASS/FAIL
+make test NO_HTTP=1   # the same without HTTP (-DFN_NO_HTTP)
 ```
 
-Your program: compile with `-I include -I <kit>/lib/m4`, link `build/fujinet-network.rel` and
-`build/m4.rel`.
+Your program: compile with `-I include -I <kit>/lib/m4` (plus `-DFN_NO_HTTP` for TCP only),
+link `build/fujinet-network.rel` and `build/m4.rel`.
 
 The test covers: 3000 bytes received the usual FujiNet way (status, then `read_nb`) and the end
 of the connection, 2000 bytes sent in pieces of 1-1400 bytes, a blocking read of slowly arriving

@@ -9,7 +9,8 @@
  *
  * Supported so far: TCP client connections ("N:TCP://host:port/") and HTTP requests
  * ("N:HTTP://host[:port]/path": GET, POST, PUT, DELETE, request headers), units N1:-N4:
- * (N: = N1:), no translation (OPEN_TRANS_NONE). Everything else (HTTPS, listening, UDP,
+ * (N: = N1:), no translation (OPEN_TRANS_NONE); -DFN_NO_HTTP leaves HTTP out (TCP only, about
+ * 2.9 KB smaller). Everything else (HTTPS, listening, UDP,
  * reading response headers, JSON, ...) returns FN_ERR_BAD_CMD with fn_network_error =
  * NETWORK_ERROR_NOT_IMPLEMENTED.
  */
