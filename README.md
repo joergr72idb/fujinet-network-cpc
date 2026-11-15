@@ -62,6 +62,16 @@ and bad devicespecs.
 CPCSyntaxError (the kit's, with M4 emulation) on Ubuntu 26.04: `make test` passes. Not yet on a
 real CPC + M4.
 
+## Next goal: a FujiNet for the Schneider CPC
+
+This library is a first step. What I'm interested in is a real FujiNet for the Schneider/Amstrad
+CPC: hardware based on the work and design of Duke's M4 board, but with an ESP32, the chip
+[FujiNet](https://fujinet.online) runs on. The CPC would then get the FujiNet firmware and its
+services like the other machines, and programs using this API would run on it without changes.
+
+So far this is only an idea - nothing is built yet. If you're working on something similar or
+would like to help, please open an issue.
+
 ## Licence
 
 GPL-3.0-or-later, see [LICENSE](LICENSE).
