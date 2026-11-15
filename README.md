@@ -15,6 +15,15 @@ n = network_read_nb("N1:", buf, waiting);
 network_close("N1:");
 ```
 
+HTTP works the same way:
+
+```c
+network_open("N1:HTTP://example.org/data.txt", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE);
+network_status("N1:", &waiting, &connected, &err);   /* sends the request; 170 = 404 */
+n = network_read_nb("N1:", buf, waiting);            /* the body, then err 136 at the end */
+network_close("N1:");
+```
+
 Underneath it uses the M4 library of
 [development-kit-cpc-and-m4](https://github.com/joergr72idb/development-kit-cpc-and-m4).
 Own code with the same names, constants and behaviour - no fujinet-lib code.
@@ -24,15 +33,33 @@ Own code with the same names, constants and behaviour - no fujinet-lib code.
 | | |
 |---|---|
 | `network_init` | finds the M4 (`FN_ERR_NO_DEVICE` without one) |
-| `network_open` | `Nx:TCP://host:port/`, host name (M4 DNS) or a.b.c.d, waits for the connection |
+| `network_open` | `Nx:TCP://host:port/` or `Nx:HTTP://host[:port]/path`, host name (M4 DNS) or a.b.c.d, waits for the connection |
 | `network_status` | bytes waiting (up to 256 per unit), connected, error (136 = end of data) |
 | `network_read_nb` | waits for at least one byte, returns what is there |
 | `network_read` | waits for all requested bytes or the end of the connection |
 | `network_write`, `network_close`, `network_unit`, `nw_status` / `fn_network_*` | |
+| HTTP methods | GET (`OPEN_MODE_HTTP_GET`, `_GET_H`), POST (`_POST`), PUT (`_PUT_H`), DELETE (`_DELETE`, `_DELETE_H`, `network_http_delete`) |
+| `network_http_post`, `network_http_post_bin`, `network_http_put` | send the request with its data, any length |
+| `network_http_start_add_headers`, `network_http_add_header`, `network_http_end_add_headers` | request headers |
+| `network_http_set_channel_mode` | `HTTP_CHAN_MODE_BODY`, `_SET_HEADERS`, `_POST_SET_DATA` (data written in pieces: up to 256 bytes) |
 
-Units `N1:`-`N4:` (`N:` = `N1:`), the M4's four sockets. **Not yet:** other protocols (HTTP,
-TNFS, ...), listening for connections, UDP, translation modes other than `OPEN_TRANS_NONE`,
-JSON. They return `FN_ERR_BAD_CMD` with `fn_network_error` = 146 (not implemented).
+Units `N1:`-`N4:` (`N:` = `N1:`), the M4's four sockets.
+
+HTTP behaves as on the FujiNet: the request goes out with the first `network_status` or read
+(until then headers and POST data can be added), an HTTP error shows as the `err` of
+`network_status` (404 = 170, 401/403 = 212, 5xx = 215, ...) and its body can still be read.
+It is plain HTTP/1.0 with `Connection: close`: the M4 has no TLS, so **no HTTPS**. Redirects
+are not followed (3xx = error 144), spaces in the path are sent as `%20`, the response headers
+are skipped. One difference: `OPEN_MODE_HTTP_PUT_H` sends a real PUT, as its documentation says - the
+FujiNet firmware (2026) sends a POST for it.
+
+**Not yet:** HTTPS, reading response headers (`HTTP_CHAN_MODE_COLLECT_HEADERS`/`_GET_HEADERS`),
+PUT of everything written until close (`OPEN_MODE_HTTP_PUT`), other protocols (TNFS, FTP, ...),
+listening for connections, UDP, translation modes other than `OPEN_TRANS_NONE`, JSON. They
+return `FN_ERR_BAD_CMD` (or `FN_ERR_IO_ERROR`) with `fn_network_error` = 146 (not implemented).
+
+Size: the library adds about 3 KB to a program with HTTP and the M4 library code
+(`RGBTCP.BIN` of Retro Game Battle: 8.8 KB with the TCP-only version, 11.9 KB with this one).
 
 ## Build and test
 
@@ -49,7 +76,10 @@ Your program: compile with `-I include -I <kit>/lib/m4`, link `build/fujinet-net
 The test covers: 3000 bytes received the usual FujiNet way (status, then `read_nb`) and the end
 of the connection, 2000 bytes sent in pieces of 1-1400 bytes, a blocking read of slowly arriving
 data, a host name, two units at once, re-opening a unit, a refused connection, an unknown host
-and bad devicespecs.
+and bad devicespecs. HTTP (against an HTTP server in `test/testserver.py`, port 6512): a
+3000-byte GET through the 256-byte buffer with a 400-byte response header line, a request
+header, a 404 with its body, POST as text, in pieces and as 1000 bytes of binary data, PUT,
+DELETE, a path with a space, and the unsupported parts (HTTPS, response headers).
 
 ## Used by
 

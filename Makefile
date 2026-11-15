@@ -20,7 +20,7 @@ CPCSE   := $(DEV)/opt/cpcse
 
 SERVER  ?= 127.0.0.1
 PORT    ?= 6510
-FRAMES  ?= 2000
+FRAMES  ?= 5000
 
 CFLAGS  := -mz80 --opt-code-size -I include -I $(DEV)/lib/cpc -I $(DEV)/lib/m4
 LDFLAGS := -mz80 --no-std-crt0 --code-loc 0x4010 --data-loc 0
