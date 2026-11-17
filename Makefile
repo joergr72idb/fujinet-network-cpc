@@ -5,9 +5,10 @@
 # CPCSyntaxError); `make DEV=/path/to/kit` for another place.
 #
 #   make                  build/fujinet-network.rel + build/m4.rel (link both into your program)
-#   make test             builds FNTEST.BIN, starts test/testserver.py and runs FNTEST headless
-#                         in the kit's emulator; prints PASS or FAIL
-#   make fntest           only FNTEST.BIN + fntest.dsk (SERVER=, PORT= for a real CPC)
+#   make test             builds FNTEST.BIN (TCP), FNHTTP.BIN (HTTP) and FNJSON.BIN (JSON) - one
+#                         program with everything does not fit in the CPC's memory - and runs each
+#                         headless in the kit's emulator against test/testserver.py: PASS or FAIL
+#   make fntest           only the programs + fntest.dsk (SERVER=, PORT= for a real CPC)
 #   NO_HTTP=1             with any of them: without HTTP (-DFN_NO_HTTP, about 3 KB smaller)
 #
 # Your program: -I include -I $(DEV)/lib/m4, link build/fujinet-network.rel build/m4.rel.
@@ -55,33 +56,64 @@ endif
 $(OBJ)/fntest.rel: test/fntest.c include/fujinet-network.h $(OBJ)/fntest.id | $(OBJ)
 	$(SDCC) $(CFLAGS) -DSERVER_HOST='"$(SERVER)"' -DSERVER_PORT=$(PORT) -c -o $@ $<
 
-# crt0 first: its JP at &4000 is the entry
-FNTEST.BIN: $(OBJ)/crt0.rel $(OBJ)/fntest.rel $(OBJ)/fujinet-network.rel $(OBJ)/m4.rel $(OBJ)/cpc.rel
-	$(SDCC) $(LDFLAGS) -o $(OBJ)/fntest.ihx $^
-	python3 -I $(DEV)/tools/cpcbin.py $(OBJ)/fntest.ihx $@
+$(OBJ)/fnhttp.rel: test/fntest.c include/fujinet-network.h $(OBJ)/fntest.id | $(OBJ)
+	$(SDCC) $(CFLAGS) -DTEST_HTTP -DSERVER_HOST='"$(SERVER)"' -DSERVER_PORT=$(PORT) -c -o $@ $<
 
-fntest.dsk: FNTEST.BIN
+$(OBJ)/fnjson.rel: test/fntest.c include/fujinet-network.h $(OBJ)/fntest.id | $(OBJ)
+	$(SDCC) $(CFLAGS) -DTEST_JSON -DSERVER_HOST='"$(SERVER)"' -DSERVER_PORT=$(PORT) -c -o $@ $<
+
+# the library without JSON, for FNTEST and FNHTTP (they don't use it; it would not fit)
+$(OBJ)/fujinet-network-nojson.rel: src/fujinet-network.c include/fujinet-network.h $(OBJ)/fntest.id | $(OBJ)
+	$(SDCC) $(CFLAGS) -DFN_NO_JSON -c -o $@ $<
+
+# program end (data and the crt0's stack included) must stay below HIMEM: &A5F7 with the M4 ROM
+HIMEM   := 0xA5F7
+define link
+	$(SDCC) $(LDFLAGS) -o $(OBJ)/$(1).ihx $(2)
+	@python3 -I -c 'import re,sys; m=open(sys.argv[1]).read(); s=int(re.search(r"(\w+)\s+s__STACK",m).group(1),16); l=int(re.search(r"(\w+)\s+l__STACK",m).group(1),16); e=s+l; print("$(1): ends at &%04X (HIMEM &%04X)" % (e, $(HIMEM))); sys.exit(e > $(HIMEM))' $(OBJ)/$(1).map || { echo "$(1) is too big for the CPC"; rm -f $(OBJ)/$(1).ihx; exit 1; }
+	python3 -I $(DEV)/tools/cpcbin.py $(OBJ)/$(1).ihx $(3)
+endef
+
+# crt0 first: its JP at &4000 is the entry. NO_HTTP: FNTEST with the TCP-only library
+LIBTCP  := $(OBJ)/$(if $(NO_HTTP),fujinet-network,fujinet-network-nojson).rel
+FNTEST.BIN: $(OBJ)/crt0.rel $(OBJ)/fntest.rel $(LIBTCP) $(OBJ)/m4.rel $(OBJ)/cpc.rel
+	$(call link,fntest,$^,$@)
+
+FNHTTP.BIN: $(OBJ)/crt0.rel $(OBJ)/fnhttp.rel $(OBJ)/fujinet-network-nojson.rel $(OBJ)/m4.rel $(OBJ)/cpc.rel
+	$(call link,fnhttp,$^,$@)
+
+FNJSON.BIN: $(OBJ)/crt0.rel $(OBJ)/fnjson.rel $(OBJ)/fujinet-network.rel $(OBJ)/m4.rel $(OBJ)/cpc.rel
+	$(call link,fnjson,$^,$@)
+
+PROGS   := FNTEST.BIN $(if $(NO_HTTP),,FNHTTP.BIN FNJSON.BIN)
+
+fntest.dsk: $(PROGS)
 	rm -f $@
 	$(IDSK) $@ -n > /dev/null
-	$(IDSK) $@ -i FNTEST.BIN > /dev/null
+	for f in $(PROGS); do $(IDSK) $@ -i $$f > /dev/null; done
 
-fntest: FNTEST.BIN fntest.dsk
+fntest: $(PROGS) fntest.dsk
 
-# headless: the test server in the background, FNTEST in the emulator, the server's verdict
-test: FNTEST.BIN
-	mkdir -p $(DEV)/m4sd && cp FNTEST.BIN $(DEV)/m4sd/
+# headless, for each program: the test server in the background, the program in the emulator, the
+# server's verdict (build/server-NAME.log, build/shot-NAME.png)
+test: $(PROGS)
+	mkdir -p $(DEV)/m4sd && cp $(PROGS) $(DEV)/m4sd/
 	$(MAKE) -C $(DEV) build/cpcse-home/cpcse.ini
-	python3 -I test/testserver.py $(PORT) 180 > $(OBJ)/server.log 2>&1 & \
+	@rc=0; for f in $(basename $(PROGS)); do \
+	  echo "=== $$f"; \
+	  python3 -I test/testserver.py $(PORT) 180 > $(OBJ)/server-$$f.log 2>&1 & \
 	  sleep 1; \
 	  ( cd $(CPCSE) && CPCSE_HOME=$(DEV)/build/cpcse-home ./cpcse --shot $(CURDIR)/$(OBJ)/shot.bmp \
-	    --model cpc6128 --m4 $(DEV)/m4sd --type 'RUN"FNTEST"\n' --frames $(FRAMES) \
-	    > $(CURDIR)/$(OBJ)/emu.log 2>&1 ); \
-	  wait $$!; rc=$$?; \
-	  $(if $(filter Darwin,$(shell uname -s)),sips -s format png $(OBJ)/shot.bmp --out $(OBJ)/shot.png > /dev/null,python3 -I $(DEV)/tools/bmp2png.py $(OBJ)/shot.bmp $(OBJ)/shot.png); \
-	  cat $(OBJ)/server.log; echo "screenshot: $(OBJ)/shot.png"; exit $$rc
+	    --model cpc6128 --m4 $(DEV)/m4sd --type "RUN\"$$f\"\n" --frames $(FRAMES) \
+	    > $(CURDIR)/$(OBJ)/emu-$$f.log 2>&1 ); \
+	  wait $$! || rc=1; \
+	  $(if $(filter Darwin,$(shell uname -s)),sips -s format png $(OBJ)/shot.bmp --out $(OBJ)/shot-$$f.png > /dev/null,python3 -I $(DEV)/tools/bmp2png.py $(OBJ)/shot.bmp $(OBJ)/shot-$$f.png); \
+	  cat $(OBJ)/server-$$f.log; \
+	done; echo "screenshots: $(OBJ)/shot-*.png"; \
+	if [ $$rc = 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi; exit $$rc
 
 $(OBJ):
 	mkdir -p $@
 
 clean:
-	rm -rf $(OBJ) FNTEST.BIN fntest.dsk
+	rm -rf $(OBJ) FNTEST.BIN FNHTTP.BIN FNJSON.BIN fntest.dsk

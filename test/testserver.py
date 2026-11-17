@@ -18,6 +18,17 @@ import time
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6510
 TIMEOUT = float(sys.argv[2]) if len(sys.argv) > 2 else 300
 
+JSON_DOC = rb"""{
+  "name": "CPC \"6128\"",
+  "ram": 128, "pi": 3.1400, "three": 3.0, "big": 1.5e3, "neg": -2,
+  "ok": true, "no": false, "nothing": null,
+  "list": [1, "two", {"x": 3}],
+  "empty": {}, "none": [],
+  "a/b": "slash", "t~x": "tilde",
+  "uni": "\u00e9\u20ac", "esc": "a\\b\/c\tz"
+}
+"""
+
 result = {"done": None, "server_ok": True, "put": b""}
 finished = threading.Event()
 
@@ -81,6 +92,24 @@ def handle(conn):
                     time.sleep(0.2)
             elif what == "T4":
                 conn.sendall(b"HI\n")
+                read_exact(conn, 1)
+            elif what == "T6":            # OPEN_TRANS_LF: the CPC's CR is LF on the network
+                conn.sendall(b"L1\nL2\n")
+                got = read_exact(conn, 4)
+                ok = got == b"X\nY\n"
+                print("server: T6", got, "ok" if ok else "WRONG", flush=True)
+                result["server_ok"] &= ok
+                conn.sendall(b"OK\n")
+                read_exact(conn, 1)
+            elif what == "T7":            # OPEN_TRANS_CRLF, a CR LF split over two sends
+                conn.sendall(b"A\r")
+                time.sleep(0.5)
+                conn.sendall(b"\nB\r\nC\rD\n")
+                got = read_exact(conn, 3)
+                ok = got == b"Q\r\n"
+                print("server: T7", got, "ok" if ok else "WRONG", flush=True)
+                result["server_ok"] &= ok
+                conn.sendall(b"OK\r\n")
                 read_exact(conn, 1)
             elif what.startswith("T5 "):    # the CPC is a server: two clients, one after the other
                 at = (conn.getpeername()[0], int(what[3:]))
@@ -147,6 +176,16 @@ class Http(BaseHTTPRequestHandler):
             self.redirect(302, "https://127.0.0.1/target")
         elif self.path.startswith("/loop"):   # /loop0, /loop1, ... for ever
             self.redirect(302, "/loop%d" % (int(self.path[5:] or 0) + 1))
+        elif self.path == "/lines":
+            self.answer(200, b"one\ntwo\n")
+        elif self.path == "/json":       # pretty printed with CR LF, as some servers do
+            self.answer(200, JSON_DOC.replace(b"\n", b"\r\n"))
+        elif self.path == "/bad.json":
+            self.answer(200, b'{"a": 1,}')
+        elif self.path == "/deep.json":  # nested deeper than the CPC allows (16)
+            self.answer(200, b"[" * 20 + b"]" * 20)
+        elif self.path == "/big.json":   # more than the CPC's 2048 bytes
+            self.answer(200, b"[" + b",".join(b'"%04d"' % i for i in range(500)) + b"]")
         elif self.path == "/target":
             self.answer(200, b"TARGET")
         elif self.path == "/info":

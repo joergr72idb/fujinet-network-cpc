@@ -39,6 +39,8 @@ Own code with the same names, constants and behaviour - no fujinet-lib code.
 | `network_read` | waits for all requested bytes or the end of the connection |
 | `network_write`, `network_close`, `network_unit`, `nw_status` / `fn_network_*` | |
 | TCP server | `Nx:TCP://:port/` listens; `network_accept`, `network_close_client` |
+| Translation | `OPEN_TRANS_CR`, `_LF`, `_CRLF`: line ends to and from the CPC's CR (not `_PET`) |
+| JSON | `network_json_parse`, `network_json_query` (documents up to 2 KB) |
 | HTTP methods | GET (`OPEN_MODE_HTTP_GET`, `_GET_H`), POST (`_POST`), PUT (`_PUT_H`), DELETE (`_DELETE`, `_DELETE_H`, `network_http_delete`) |
 | `network_http_post`, `network_http_post_bin`, `network_http_put` | send the request with its data, any length |
 | `network_http_start_add_headers`, `network_http_add_header`, `network_http_end_add_headers` | request headers |
@@ -102,15 +104,53 @@ Differences from the FujiNet firmware (2026):
   (`FN_HDR_NAMES`, `FN_HDR_VALUES`, `FN_RXBUF` when compiling the library).
 - An empty `OPEN_MODE_HTTP_PUT` is sent (`Content-Length: 0`); the firmware sends nothing.
 
-**Not yet:** HTTPS, other protocols (TNFS, FTP, ...), UDP,
-translation modes other than `OPEN_TRANS_NONE`, JSON. They return `FN_ERR_BAD_CMD` (or
+**Translation** works as on the FujiNet, with CR as the CPC's end of line (the FujiNet's
+default outside the Atari, whose end of line is 0x9B): with `OPEN_TRANS_LF` a received LF becomes
+CR and a CR written over TCP is sent as LF; with `OPEN_TRANS_CRLF` a received CR LF becomes CR
+(also when the two come in different packets) and a written CR goes as CR LF. `OPEN_TRANS_CR`
+changes nothing on the CPC. For HTTP only the received body is translated (as the firmware does).
+The bytes waiting are counted after the translation. `OPEN_TRANS_PET` (PETSCII, C64) returns 146.
+
+**JSON** works as on the FujiNet:
+
+```c
+network_open("N1:HTTP://example.org/api", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE);
+network_json_parse("N1:");                        /* reads the whole body, checks it */
+n = network_json_query("N1:", "/list/0/name", buf);   /* a JSON pointer; buf: "Joe", n = 3 */
+network_close("N1:");
+```
+
+The result is the FujiNet's: a string without its quotes and with its escapes decoded (`\u00e9`
+as UTF-8), `TRUE`, `FALSE`, `NULL`, a number, an object as `key CR value CR ...`, an array as its
+values one after the other; the last end of line is cut off, `buf` is 0-terminated, a path that
+is not there gives "" and 0. Invalid JSON: `network_json_parse` gives `FN_ERR_IO_ERROR` with 213.
+Differences: there is no room for a parsed tree on the CPC, so the document stays as text (up to
+`FN_JSON_BUF` = 2048 bytes, nested up to 16 deep; bigger gives error 255) and each query walks
+it; one document at a time (parsing on another unit replaces it). Numbers come as written, only
+trailing zeros of a fraction are dropped (`3.0` -> `3`, `1.50` -> `1.5`) - the firmware converts
+them (`1.5e3` -> `1500`). A `\u` surrogate pair is not combined into one character.
+`network_set_eol` and the query flags (`network_set_query_param`) are not there.
+
+**Not yet:** HTTPS, other protocols (TNFS, FTP, ...), UDP. They return `FN_ERR_BAD_CMD` (or
 `FN_ERR_IO_ERROR`) with `fn_network_error` = 146 (not implemented).
 
-Size: HTTP costs about 5.5 KB of code and 0.7 KB of data. A program that only needs TCP compiles
-the library with `-DFN_NO_HTTP` (`make NO_HTTP=1` here): HTTP opens then return "not implemented"
-as before, and the `network_http_*` functions are left out, so a program that uses them does not
-link. The library is then 2.7 KB of code and 1.1 KB of data (most of it the 4 receive buffers);
-Retro Game Battle's CPC client `RGBTCP.BIN` is 9.1 KB with `-DFN_NO_HTTP`.
+Size (SDCC 4.5, code / data):
+
+| Build | Code | Data |
+|---|---|---|
+| everything | 11.9 KB | 3.9 KB (2 KB of it the JSON document) |
+| `-DFN_NO_JSON` | 9.4 KB | 1.8 KB |
+| `-DFN_NO_HTTP` (TCP only, JSON left out too) | 3.3 KB | 1.1 KB (mostly the 4 receive buffers) |
+
+With `-DFN_NO_HTTP` (`make NO_HTTP=1` here) HTTP opens return "not implemented" and the
+`network_http_*` and `network_json_*` functions are left out, so a program that uses them does not
+link; `-DFN_NO_JSON` leaves out only JSON. Retro Game Battle's CPC client `RGBTCP.BIN` is about
+9.8 KB with `-DFN_NO_HTTP`.
+
+Memory: on the CPC a program's code, data and stack go from &4000 to HIMEM, &A5F7 with the M4 ROM
+(about 26 KB). The whole library with the M4 library and `printf` takes more than half of it.
+The kit's `crt0.s` gives the program its own 1 KB stack (from kit commit 5deafce): the firmware's
+has only about 200 bytes, which this library's calls go beyond.
 
 ## Status (2026-11-17)
 
@@ -125,15 +165,15 @@ HTTP. What is left are extras (see Open). Issues and ideas are welcome.
 - Response headers (`HTTP_CHAN_MODE_COLLECT_HEADERS` / `_GET_HEADERS`), redirects (301/302),
   `OPEN_MODE_HTTP_PUT` (2026-11-17).
 - TCP server: listening, `network_accept`, `network_close_client`, one client at a time (2026-11-17).
-- TCP-only build (`-DFN_NO_HTTP`, about 5.5 KB smaller), used by Retro Game Battle.
-- Test program against a local test server (`make test`, both variants) - in the emulator.
+- Translation of line ends (`OPEN_TRANS_CR`, `_LF`, `_CRLF`) and JSON (parse, query) (2026-11-17).
+- TCP-only build (`-DFN_NO_HTTP`), used by Retro Game Battle; `-DFN_NO_JSON`.
+- Test programs against a local test server (`make test`, both variants) - in the emulator.
 
 **Open**
 
 | | Note |
 |---|---|
 | Real CPC + M4 | everything so far runs only in the emulator (CPCSyntaxError with M4 emulation) |
-| Translation modes, JSON | `OPEN_TRANS_*` other than NONE, FujiNet's JSON parser - no M4 limits here |
 | UDP (a plus) | not offered by the M4 as documented - see the hint below |
 | TNFS (a plus) | FujiNet's file protocol, normally over UDP - only with UDP, or if TNFS over TCP works (to be checked) |
 | HTTPS | not possible on the M4 (no TLS) - only with FujiNet hardware (see the next goal) |
@@ -150,17 +190,24 @@ would come with FujiNet hardware for the CPC (see the next goal).
 
 ## Build and test
 
-Needs the CPC development kit next to this folder (its setup script run), from commit f0c2222
-on (`m4_listen` in its M4 library).
+Needs the CPC development kit next to this folder (its setup script run), from commit 5deafce
+on (`m4_listen` in its M4 library, its own stack in `crt0.s`).
 
 ```sh
 make            # build/fujinet-network.rel + build/m4.rel
-make test       # test program FNTEST in the kit's emulator against test/testserver.py: PASS/FAIL
-make test NO_HTTP=1   # the same without HTTP (-DFN_NO_HTTP)
+make test       # FNTEST, FNHTTP, FNJSON in the kit's emulator against test/testserver.py: PASS/FAIL
+make test NO_HTTP=1   # FNTEST only, with the TCP-only library (-DFN_NO_HTTP)
 ```
 
 Your program: compile with `-I include -I <kit>/lib/m4` (plus `-DFN_NO_HTTP` for TCP only),
 link `build/fujinet-network.rel` and `build/m4.rel`.
+
+The tests are three programs - one with everything would not fit in the CPC's memory: FNTEST
+(TCP client and server, translation, errors; linked with the library without JSON), FNHTTP
+(HTTP, the same library) and FNJSON (JSON, the whole library). The Makefile checks that each ends
+below HIMEM (&A5F7) - "too big for the CPC" otherwise. For a real CPC: `make fntest SERVER=<the
+PC's address>` puts them on `fntest.dsk`; `python3 test/testserver.py` on the PC; `RUN"FNTEST"`,
+then the server again for `RUN"FNHTTP"` and `RUN"FNJSON"`.
 
 The test covers: the CPC as a TCP server (T5: two clients one after the other - the test server
 connects to the address the CPC called it from - with the errors before, between and after
@@ -174,7 +221,12 @@ DELETE, a path with a space; redirects (to another host name, to a path, for DEL
 followed: more than 10, to https, for POST); response headers collected through a redirect
 (order, case, an EOL after the name, a missing one, a second unit refused, read again, then the
 body); `OPEN_MODE_HTTP_PUT` sent by a read and by the close (with an HTTP error from the close);
-and HTTPS (not supported).
+an HTTP body with `OPEN_TRANS_LF`; and HTTPS (not supported). Translation over TCP (T6, T7): LF
+and CR LF both ways, a CR LF split over two packets, the bytes waiting after it, PETSCII refused.
+JSON (FNJSON): 21 queries on a pretty printed document with CR LF (every type, escapes, `\u`,
+`~0`/`~1` in a path, an array, an object, empty ones, a missing path, a query without `/`), the
+whole document, a query before parsing and after closing, invalid JSON, too deep, too big, a 404
+body.
 
 ## Used by
 

@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2026 joergr72idb - see LICENSE */
 /* fntest - tests the fujinet-network layer on the CPC + M4 against test/testserver.py.
+ * Three programs, as one is too big for the CPC's memory (&4000-&A5F7 with the M4) with the whole
+ * library: FNTEST (TCP client and server, translation, errors), with -DTEST_HTTP FNHTTP (HTTP) and
+ * with -DTEST_JSON FNJSON (JSON).
  * Each result goes to the screen and over a second connection (N2:) to the test server,
  * which prints a summary. Build: make test SERVER=... PORT=...
  */
@@ -16,8 +19,15 @@
 #define SERVER_PORT 6510
 #endif
 
-static char spec[64], rspec[64], spec3[64], line[80];
+static char spec[64], rspec[64], line[80];
+#ifdef TEST_HTTP
+static char spec3[64];                  /* a second HTTP unit */
+#endif
+#ifdef TEST_JSON
+static uint8_t buf[16];                 /* (JSON has its own) */
+#else
 static uint8_t buf[1500];
+#endif
 static uint8_t failed;
 
 static void report(const char *name, uint8_t ok, const char *detail)
@@ -45,6 +55,8 @@ static FN_ERR open_test(const char *unit, const char *cmd)
     return e;
 }
 
+#if !defined(TEST_HTTP) && !defined(TEST_JSON)
+#define TEST_TCP
 /* T1: 3000 bytes from the server, read the RGB way (status, then read_nb), then EOF */
 static void t1(void)
 {
@@ -147,6 +159,34 @@ static void t4(void)
     network_close(spec);
 }
 
+/* T6/T7: translation of line ends - LF, and CR LF (one split over two sends) */
+static void trans_test(const char *name, uint8_t trans, const char *cmd, const char *want,
+                       const char *send)
+{
+    uint16_t bw;
+    uint8_t c, err, ok;
+    int16_t r, n = strlen(want);
+    char d[60];
+
+    sprintf(spec, "N1:TCP://%s:%u/", SERVER_HOST, SERVER_PORT);
+    if (network_open(spec, OPEN_MODE_RW, trans) != FN_ERR_OK) {
+        report(name, 0, "open");
+        return;
+    }
+    network_write(spec, cmd, strlen(cmd));      /* "T6\r" goes as "T6\n" (T7: "T7\r\n") */
+    r = network_read(spec, buf, n);
+    buf[r > 0 ? r : 0] = 0;
+    ok = r == n && !strcmp((char *)buf, want);
+    network_status(spec, &bw, &c, &err);
+    ok &= bw == 0;                      /* nothing more waiting: the count was exact */
+    ok &= network_write(spec, send, strlen(send)) == FN_ERR_OK;
+    r = network_read(spec, buf + 100, 3);
+    ok &= r == 3 && !memcmp(buf + 100, "OK\r", 3);
+    sprintf(d, "r=%d bw=%u", r, bw);
+    report(name, ok, d);
+    network_close(spec);
+}
+
 /* T5: the CPC as a TCP server on SERVER_PORT + 4 - the test server connects twice */
 static uint8_t bad;
 
@@ -230,7 +270,9 @@ static void t5(void)
     report("T5-server", !bad, bad ? d : "two clients");
 }
 
-#ifndef FN_NO_HTTP
+#endif /* TEST_TCP */
+
+#if !defined(FN_NO_HTTP) && !defined(TEST_TCP)
 /* ---- HTTP (the test server's HTTP port is SERVER_PORT + 2) ---- */
 
 static void hspec(const char *path)
@@ -238,6 +280,7 @@ static void hspec(const char *path)
     sprintf(spec, "N1:HTTP://%s:%u%s", SERVER_HOST, SERVER_PORT + 2, path);
 }
 
+#ifdef TEST_HTTP
 /* reads the response body the usual way (status, read_nb) into buf, 0-terminated */
 static uint16_t body(uint8_t *err)
 {
@@ -387,6 +430,93 @@ static void http_put(void)
     report("H17-put-close", ok && e == FN_ERR_IO_ERROR && fn_network_error == NETWORK_ERROR_FILE_NOT_FOUND, d);
 }
 
+#endif /* TEST_HTTP */
+
+#ifdef TEST_JSON
+/* H19-H21: JSON */
+static const char *const jq[] = {
+    "/name", "CPC \"6128\"",
+    "/ram", "128",
+    "/pi", "3.14",
+    "/three", "3",
+    "/big", "1.5e3",
+    "/neg", "-2",
+    "/ok", "TRUE",
+    "/no", "FALSE",
+    "/nothing", "NULL",
+    "/list/1", "two",
+    "/list/2/x", "3",
+    "/list", "1\rtwo\rx\r3",
+    "/list/3", "",
+    "/empty", "",
+    "/none", "",
+    "/a~1b", "slash",
+    "/t~0x", "tilde",
+    "/uni", "\xc3\xa9\xe2\x82\xac",
+    "/esc", "a\\b/c\tz",
+    "/missing", "",
+    "name", "",
+    0
+};
+
+static void json_open(const char *path)
+{
+    hspec(path);
+    network_open(spec, OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE);
+}
+
+static void http_json(void)
+{
+    static char out[200];
+    const char *const *q;
+    uint8_t ok = 1, e;
+    int16_t r;
+    char d[60];
+
+    json_open("/json");
+    r = network_json_query(spec, "/ram", out);
+    ok &= r < 0;                        /* not parsed yet */
+    e = network_json_parse(spec);
+    sprintf(d, "parse e=%u err=%u", e, fn_network_error);
+    if (e != FN_ERR_OK) {
+        report("H19-json", 0, d);
+        network_close(spec);
+        return;
+    }
+    for (q = jq; *q; q += 2) {
+        r = network_json_query(spec, q[0], out);
+        if (r != (int16_t)strlen(q[1]) || strcmp(out, q[1])) {
+            sprintf(d, "%s: r=%d \"%.20s\"", q[0], r, out);
+            ok = 0;
+            break;
+        }
+    }
+    report("H19-json", ok, ok ? "21 queries" : d);
+    r = network_json_query(spec, "", out);      /* the whole document */
+    report("H20-json-all", r > 20 && !memcmp(out, "name\rCPC \"6128\"\rram\r128\r", 23), "");
+    network_close(spec);
+    ok = network_json_query(spec, "/ram", out) < 0;     /* closed: gone */
+
+    json_open("/bad.json");
+    ok &= network_json_parse(spec) == FN_ERR_IO_ERROR && fn_network_error == NETWORK_ERROR_COULD_NOT_PARSE_JSON;
+    network_close(spec);
+    json_open("/deep.json");
+    ok &= network_json_parse(spec) == FN_ERR_IO_ERROR && fn_network_error == NETWORK_ERROR_COULD_NOT_PARSE_JSON;
+    network_close(spec);
+    json_open("/big.json");
+    e = network_json_parse(spec);
+    sprintf(d, "big e=%u err=%u", e, fn_network_error);
+    ok &= e == FN_ERR_IO_ERROR && fn_network_error == NETWORK_ERROR_COULD_NOT_ALLOCATE_BUFFERS;
+    network_close(spec);
+    json_open("/missing");                      /* a 404 body "nope": not JSON */
+    ok &= network_json_parse(spec) == FN_ERR_IO_ERROR;
+    network_close(spec);
+    report("H21-json-errors", ok, d);
+}
+#endif /* TEST_JSON */
+
+#ifdef TEST_HTTP
+
 static void http_tests(void)
 {
     uint16_t i, n;
@@ -486,7 +616,17 @@ static void http_tests(void)
 
     http_headers();
     http_put();
+
+    /* H18: an HTTP body with OPEN_TRANS_LF (the head is not translated) */
+    hspec("/lines");
+    network_open(spec, OPEN_MODE_HTTP_GET, OPEN_TRANS_LF);
+    body(&err);
+    sprintf(d, "err=%u n=%u", err, (unsigned)strlen((char *)buf));
+    report("H18-trans-http", !strcmp((char *)buf, "one\rtwo\r") && err == NETWORK_ERROR_END_OF_FILE, d);
+    network_close(spec);
+
 }
+#endif /* TEST_HTTP */
 #endif
 
 static void expect(const char *name, const char *s, uint8_t mode, uint8_t trans, FN_ERR want, uint8_t code)
@@ -505,7 +645,13 @@ int main(void)
     uint8_t c, err;
     char d[40];
 
+#if defined(TEST_HTTP)
+    cpc_print("FNHTTP - fujinet-network on the M4\r\n");
+#elif defined(TEST_JSON)
+    cpc_print("FNJSON - fujinet-network on the M4\r\n");
+#else
     cpc_print("FNTEST - fujinet-network on the M4\r\n");
+#endif
     if (network_init() != FN_ERR_OK) {
         cpc_print("FAIL init: no M4\r\n");
         return 0;
@@ -517,32 +663,38 @@ int main(void)
     }
     network_write(rspec, "REPORT\n", 7);
 
+#if defined(TEST_HTTP)
+    http_tests();
+    expect("https", "N1:HTTPS://127.0.0.1/", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE,
+           FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
+#elif defined(TEST_JSON)
+    http_json();
+#else
     t1();
     t2();
     t3();
     t4();
     t5();
+    trans_test("T6-trans-lf", OPEN_TRANS_LF, "T6\r", "L1\rL2\r", "X\rY\r");
+    trans_test("T7-trans-crlf", OPEN_TRANS_CRLF, "T7\r", "A\rB\rC\rD\n", "Q\r");
     sprintf(spec, "N1:TCP://127.0.0.1:%u/", SERVER_PORT + 1);   /* nobody listens there */
     expect("refused", spec, OPEN_MODE_RW, OPEN_TRANS_NONE, FN_ERR_IO_ERROR, NETWORK_ERROR_CONNECTION_REFUSED);
     expect("no-host", "N1:TCP://nosuch.invalid:80/", OPEN_MODE_RW, OPEN_TRANS_NONE,
            FN_ERR_IO_ERROR, NETWORK_ERROR_NETWORK_UNREACHABLE);
     expect("unit5", "N5:TCP://127.0.0.1:80/", OPEN_MODE_RW, OPEN_TRANS_NONE,
            FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
-#ifndef FN_NO_HTTP
-    http_tests();
-#else
+#ifdef FN_NO_HTTP
     expect("no-http", "N1:HTTP://127.0.0.1/", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE,
            FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
 #endif
-    expect("https", "N1:HTTPS://127.0.0.1/", OPEN_MODE_HTTP_GET, OPEN_TRANS_NONE,
-           FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
     expect("no-port", "N1:TCP://127.0.0.1/", OPEN_MODE_RW, OPEN_TRANS_NONE,
            FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
-    expect("trans", "N1:TCP://127.0.0.1:80/", OPEN_MODE_RW, OPEN_TRANS_CRLF,
+    expect("trans-pet", "N1:TCP://127.0.0.1:80/", OPEN_MODE_RW, OPEN_TRANS_PET,
            FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
     sprintf(d, "r=%d", network_read_nb("N4:", buf, 10));
     report("not-open", network_read_nb("N4:", buf, 10) < 0
            && network_status("N4:", &bw, &c, &err) != FN_ERR_OK, d);
+#endif
 
     sprintf(line, "DONE %s\r\n", failed ? "FAIL" : "PASS");
     cpc_print(line);

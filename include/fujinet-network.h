@@ -7,12 +7,13 @@
  * FujiNet on the Atari, C64 or Apple II builds for the CPC too. Underneath it talks to the
  * M4 board (lib/m4 of development-kit-cpc-and-m4). Own code, not taken from fujinet-lib.
  *
- * Supported so far: TCP client and server connections ("N:TCP://host:port/", "N:TCP://:port/")
- * and HTTP requests
- * ("N:HTTP://host[:port]/path": GET, POST, PUT, DELETE, request and response headers,
- * redirects), units N1:-N4: (N: = N1:), no translation (OPEN_TRANS_NONE); -DFN_NO_HTTP leaves
- * HTTP out (TCP only, about 5.5 KB smaller). Everything else (HTTPS, UDP, JSON, ...)
- * returns FN_ERR_BAD_CMD with fn_network_error = NETWORK_ERROR_NOT_IMPLEMENTED.
+ * Supported so far: TCP client and server connections ("N:TCP://host:port/", "N:TCP://:port/"),
+ * HTTP requests ("N:HTTP://host[:port]/path": GET, POST, PUT, DELETE, request and response
+ * headers, redirects), translation of line ends (OPEN_TRANS_CR, _LF, _CRLF; the CPC's end of line
+ * is CR) and JSON (network_json_parse, network_json_query); units N1:-N4: (N: = N1:).
+ * -DFN_NO_HTTP leaves HTTP and JSON out (TCP only), -DFN_NO_JSON only JSON. Everything else
+ * (HTTPS, UDP, TNFS, PETSCII translation, ...) returns FN_ERR_BAD_CMD with fn_network_error =
+ * NETWORK_ERROR_NOT_IMPLEMENTED.
  */
 #ifndef FUJINET_NETWORK_H
 #define FUJINET_NETWORK_H
@@ -53,6 +54,7 @@ enum {
     NETWORK_ERROR_SERVER_NOT_RUNNING            = 208,
     NETWORK_ERROR_NO_CONNECTION_WAITING         = 209,
     NETWORK_ERROR_INVALID_USERNAME_OR_PASSWORD  = 212,
+    NETWORK_ERROR_COULD_NOT_PARSE_JSON          = 213,
     NETWORK_ERROR_CLIENT_GENERAL                = 214,
     NETWORK_ERROR_SERVER_GENERAL                = 215,
     NETWORK_ERROR_NO_DEVICE_AVAILABLE           = 216,
@@ -176,5 +178,18 @@ FN_ERR network_http_post_bin(const char *devicespec, const uint8_t *data, uint16
 
 /* opens a DELETE request; read the response, then close */
 #define network_http_delete(devicespec, trans) network_open(devicespec, OPEN_MODE_HTTP_DELETE_H, trans)
+
+/* ---- JSON (not with -DFN_NO_HTTP or -DFN_NO_JSON) ----
+ * network_json_parse reads the rest of the data (the HTTP body) - up to FN_JSON_BUF bytes, 2048 if
+ * not set when compiling the library - and checks it: FN_ERR_IO_ERROR with
+ * NETWORK_ERROR_COULD_NOT_PARSE_JSON (213) if it is not JSON, _COULD_NOT_ALLOCATE_BUFFERS if too
+ * big. One document at a time: parsing on another unit replaces it.
+ * network_json_query: query is a JSON pointer ("/list/0/name", "" = all of it). The value goes to
+ * buffer, 0-terminated, without the last end of line; returns its length (0 = not there), negative
+ * if nothing was parsed on this unit. As the FujiNet: strings without quotes, TRUE, FALSE, NULL,
+ * objects as key CR value CR ..., arrays as their values one after the other. buffer must hold the
+ * result. */
+FN_ERR network_json_parse(const char *devicespec);
+int16_t network_json_query(const char *devicespec, const char *query, char *buffer);
 
 #endif

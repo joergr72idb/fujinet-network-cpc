@@ -18,6 +18,11 @@
  * Redirects: 301 and 302 for GET and DELETE are followed (up to FN_REDIRECTS), as the FujiNet
  * firmware does. OPEN_MODE_HTTP_PUT: the written data waits in the receive buffer like POST data.
  *
+ * Translation (OPEN_TRANS_LF, _CRLF): the line ends of received data (TCP, HTTP body) become CR,
+ * the CPC's (the FujiNet's default end of line outside the Atari); CRs sent over TCP become LF or
+ * CR LF. It is done in the receive buffer as the data comes, so the bytes waiting are exact.
+ * OPEN_TRANS_CR changes nothing here; OPEN_TRANS_PET is not supported.
+ *
  * TCP server ("N1:TCP://:port/"): the M4 listens on a socket and takes one client on it; the
  * socket then IS that connection and no longer listens. So one client at a time per unit: when it
  * has gone (or network_close_client) a new socket listens again; until then others are refused.
@@ -54,6 +59,18 @@ enum { S_LISTEN = 1, S_CLIENT };
 #endif
 #define FN_HOST       64        /* host name */
 
+#ifdef FN_NO_HTTP                       /* JSON comes with HTTP */
+#ifndef FN_NO_JSON
+#define FN_NO_JSON
+#endif
+#endif
+#ifndef FN_JSON_BUF
+#define FN_JSON_BUF   2048      /* network_json_parse: the largest document */
+#endif
+#ifndef FN_JSON_DEPTH
+#define FN_JSON_DEPTH 16        /* nesting of objects and arrays */
+#endif
+
 typedef struct {
     uint8_t sock;               /* M4 socket, 0 = unit not open */
     uint8_t closed;             /* the other side closed the connection (or it failed) */
@@ -71,6 +88,9 @@ typedef struct {
     uint8_t redirs;             /* redirects followed so far */
     char host[FN_HOST];
 #endif
+    uint8_t trans;              /* OPEN_TRANS_*: line ends translated (CR is the CPC's) */
+    uint8_t lastcr;             /* OPEN_TRANS_CRLF: the last byte received was a CR */
+    uint16_t fresh;             /* the last bytes in rx not translated yet */
     uint16_t start, len;        /* buffered bytes: rx[start .. start+len) */
     uint8_t rx[FN_RXBUF];
 } Unit;
@@ -78,6 +98,9 @@ typedef struct {
 NetworkStatus nw_status;
 
 static Unit units[UNITS];
+#ifndef FN_NO_JSON
+static Unit *json_unit;                 /* the unit whose JSON document is parsed, 0 = none */
+#endif
 static uint8_t ready;           /* network_init found the M4 */
 
 FN_ERR network_init(void)
@@ -462,6 +485,42 @@ static void listen_again(Unit *u)
     u->sock = s;
 }
 
+/* translates the line ends of the bytes received since the last time (not in an HTTP head) */
+static void translate(Unit *u)
+{
+    uint8_t *p, *q, *end, c, t, cr;
+    uint16_t n = u->fresh;
+
+    if (n > u->len)                     /* some were dropped or taken */
+        u->fresh = n = u->len;
+#ifndef FN_NO_HTTP
+    if (u->state == H_REQUEST || u->state == H_HEAD)
+        return;
+#endif
+    u->fresh = 0;
+    t = u->trans;
+    if (t != OPEN_TRANS_LF && t != OPEN_TRANS_CRLF)
+        return;
+    end = u->rx + u->start + u->len;
+    p = q = end - n;
+    cr = u->lastcr;
+    while (p != end) {
+        c = *p++;
+        if (c == '\n') {
+            if (t == OPEN_TRANS_LF)
+                c = '\r';
+            else if (cr) {              /* CR LF -> CR (also split over two reads) */
+                cr = 0;
+                continue;
+            }
+        }
+        cr = c == '\r';
+        *q++ = c;
+    }
+    u->lastcr = cr;
+    u->len -= (uint16_t)(end - q);
+}
+
 /* takes what the M4 has into the unit's buffer, without waiting (HTTP: through the head) */
 static void fill(Unit *u)
 {
@@ -487,8 +546,10 @@ static void fill(Unit *u)
             u->closed = 1;
             if (u->srv)                 /* the client has gone: listen again at once */
                 listen_again(u);
-        } else
+        } else {
             u->len += r;
+            u->fresh += r;
+        }
 #ifndef FN_NO_HTTP
         if (u->state == H_HEAD)
             head(u);
@@ -503,6 +564,7 @@ static void fill(Unit *u)
         u->redir = 0;
     }
 #endif
+    translate(u);
 }
 
 #ifndef FN_NO_HTTP
@@ -665,7 +727,7 @@ FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
         return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_INVALID_DEVICESPEC);
     if (network_init() != FN_ERR_OK)
         return fail(FN_ERR_NO_DEVICE, NETWORK_ERROR_NO_DEVICE_AVAILABLE);
-    if (trans != OPEN_TRANS_NONE)
+    if (trans > OPEN_TRANS_CRLF)        /* PETSCII: not on the CPC */
         return fail(FN_ERR_BAD_CMD, NETWORK_ERROR_NOT_IMPLEMENTED);
 
     p = strchr(devicespec, ':') + 1;
@@ -719,6 +781,9 @@ FN_ERR network_open(const char *devicespec, uint8_t mode, uint8_t trans)
 #endif
     u->sock = s;
     u->closed = 0;
+    u->trans = trans;
+    u->lastcr = 0;
+    u->fresh = 0;
     u->method = method;
     u->chan = HTTP_CHAN_MODE_BODY;
     u->err = NETWORK_SUCCESS;
@@ -747,6 +812,10 @@ FN_ERR network_close(const char *devicespec)
         }
         if (u == hdr_unit)
             hdr_unit = 0;
+#endif
+#ifndef FN_NO_JSON
+        if (u == json_unit)
+            json_unit = 0;
 #endif
         if (u->sock != M4_ERROR)        /* M4_ERROR: a redirect or listening again failed */
             m4_close(u->sock);
@@ -980,6 +1049,27 @@ static FN_ERR add_data(Unit *u, const uint8_t *buf, uint16_t len)
 }
 #endif
 
+/* TCP: sends with the CRs as LF or CR LF */
+static FN_ERR send_translated(Unit *u, const uint8_t *buf, uint16_t len)
+{
+    uint8_t out[64], n = 0, c;
+
+    while (len--) {
+        c = *buf++;
+        if (c == '\r') {
+            if (u->trans == OPEN_TRANS_CRLF)
+                out[n++] = '\r';
+            c = '\n';
+        }
+        out[n++] = c;
+        if ((n >= sizeof out - 1 || !len) && m4_send(u->sock, out, n) != 0)
+            return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_GENERAL);
+        if (n >= sizeof out - 1)
+            n = 0;
+    }
+    return FN_ERR_OK;
+}
+
 FN_ERR network_write(const char *devicespec, const void *buf, uint16_t len)
 {
     Unit *u = open_unit(devicespec);
@@ -1002,6 +1092,8 @@ FN_ERR network_write(const char *devicespec, const void *buf, uint16_t len)
 #endif
     if (u->srv && (u->srv == S_LISTEN || u->closed))  /* no client (sock may listen again) */
         return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_NOT_CONNECTED);
+    if (u->trans == OPEN_TRANS_LF || u->trans == OPEN_TRANS_CRLF)
+        return send_translated(u, buf, len);
     if (m4_send(u->sock, buf, len) != 0)
         return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_GENERAL);
     return FN_ERR_OK;
@@ -1065,3 +1157,378 @@ FN_ERR network_http_post(const char *devicespec, const char *data)
     return network_http_post_bin(devicespec, (const uint8_t *)data, strlen(data));
 }
 #endif /* FN_NO_HTTP */
+
+#ifndef FN_NO_JSON
+/* ---- JSON ----------------------------------------------------------------------------- */
+/* network_json_parse reads the rest of the unit's data (the HTTP body) into one buffer and
+   checks it; network_json_query walks that text along a JSON pointer ("/a/0/b") - there is no
+   room on the CPC for a parsed tree. The output is the FujiNet's: strings without quotes and
+   escapes decoded, TRUE/FALSE/NULL, numbers, objects as key EOL value..., arrays as their values,
+   each scalar and key followed by the end of line (CR); the last one is cut off. */
+
+static char json[FN_JSON_BUF];
+static uint16_t json_len;
+static const char *jp, *je;             /* where the walk is, the end of the document */
+static char *jout;                      /* network_json_query: the next byte of the result */
+static uint8_t pend[2], npend;          /* the rest of a UTF-8 sequence from \uXXXX */
+
+static void ws(void)
+{
+    while (jp < je && (*jp == ' ' || *jp == '\t' || *jp == '\n' || *jp == '\r'))
+        ++jp;
+}
+
+static int16_t hex4(void)
+{
+    uint8_t i, c;
+    int16_t v = 0;
+
+    for (i = 0; i < 4; ++i) {
+        if (jp >= je)
+            return -1;
+        c = *jp++;
+        if (c >= '0' && c <= '9')
+            c -= '0';
+        else if ((c | 32) >= 'a' && (c | 32) <= 'f')
+            c = (c | 32) - 'a' + 10;
+        else
+            return -1;
+        v = v << 4 | c;
+    }
+    return v;
+}
+
+/* the next byte of the string jp is in (after its opening quote), escapes decoded (\uXXXX as
+   UTF-8, as cJSON does); -1 at its closing quote (jp is then after it), -2 if it is not valid */
+static int16_t str_next(void)
+{
+    uint8_t c;
+    int16_t u;
+
+    if (npend)
+        return pend[--npend];
+    if (jp >= je)
+        return -2;
+    c = *jp++;
+    if (c == '"')
+        return -1;
+    if (c < 0x20)
+        return -2;
+    if (c != '\\')
+        return c;
+    if (jp >= je)
+        return -2;
+    switch (c = *jp++) {
+    case '"': case '\\': case '/':
+        return c;
+    case 'b': return 8;
+    case 'f': return 12;
+    case 'n': return 10;
+    case 'r': return 13;
+    case 't': return 9;
+    case 'u':
+        if ((u = hex4()) < 0)
+            return -2;
+        if ((uint16_t)u < 0x80)
+            return u;
+        pend[0] = 0x80 | (u & 0x3F);
+        if ((uint16_t)u < 0x800) {
+            npend = 1;
+            return 0xC0 | (u >> 6);
+        }
+        pend[1] = 0x80 | ((u >> 6) & 0x3F);
+        npend = 2;
+        return 0xE0 | ((uint16_t)u >> 12);
+    }
+    return -2;
+}
+
+static uint8_t skip_string(void)        /* jp at its opening quote; 1 = valid */
+{
+    int16_t b;
+
+    ++jp;
+    npend = 0;
+    while ((b = str_next()) >= 0)
+        ;
+    npend = 0;
+    return b == -1;
+}
+
+static uint8_t digits(void)             /* 1 = at least one */
+{
+    const char *p = jp;
+
+    while (jp < je && *jp >= '0' && *jp <= '9')
+        ++jp;
+    return jp != p;
+}
+
+/* skips the value at jp (after white space), checking it; depth = nesting still allowed */
+static uint8_t skip_value(uint8_t depth)
+{
+    char c, close;
+
+    ws();
+    if (jp >= je)
+        return 0;
+    c = *jp;
+    if (c == '"')
+        return skip_string();
+    if (c == '{' || c == '[') {
+        if (!depth)
+            return 0;
+        close = c == '{' ? '}' : ']';
+        ++jp;
+        ws();
+        if (jp < je && *jp == close) {
+            ++jp;
+            return 1;
+        }
+        for (;;) {
+            if (c == '{') {
+                ws();
+                if (jp >= je || *jp != '"' || !skip_string())
+                    return 0;
+                ws();
+                if (jp >= je || *jp++ != ':')
+                    return 0;
+            }
+            if (!skip_value(depth - 1))
+                return 0;
+            ws();
+            if (jp >= je)
+                return 0;
+            if (*jp == ',') {
+                ++jp;
+                continue;
+            }
+            return *jp++ == close;
+        }
+    }
+    if (je - jp >= 4 && (prefix(jp, "true") || prefix(jp, "null"))) {
+        jp += 4;
+        return 1;
+    }
+    if (je - jp >= 5 && prefix(jp, "false")) {
+        jp += 5;
+        return 1;
+    }
+    if (c == '-')
+        ++jp;
+    if (!digits())
+        return 0;
+    if (jp < je && *jp == '.') {
+        ++jp;
+        if (!digits())
+            return 0;
+    }
+    if (jp < je && (*jp == 'e' || *jp == 'E')) {
+        ++jp;
+        if (jp < je && (*jp == '+' || *jp == '-'))
+            ++jp;
+        if (!digits())
+            return 0;
+    }
+    return 1;
+}
+
+FN_ERR network_json_parse(const char *devicespec)
+{
+    Unit *u = read_unit(devicespec);
+    uint16_t n = 0, k;
+    uint8_t big = 0;
+
+    if (!u)
+        return FN_ERR_IO_ERROR;
+    if (json_unit == u)
+        json_unit = 0;
+    for (;;) {                          /* everything up to the end of the data */
+        fill(u);
+        k = avail(u);
+        if (!k) {
+            if (u->closed)
+                break;
+            continue;
+        }
+        if (k > FN_JSON_BUF - n) {      /* too big: the rest is dropped */
+            big = 1;
+            u->start = u->len = 0;
+        } else
+            n += take(u, (uint8_t *)json + n, k);
+    }
+    set_status(u);
+    if (big)
+        return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_COULD_NOT_ALLOCATE_BUFFERS);
+    jp = json;
+    je = json + n;
+    if (!skip_value(FN_JSON_DEPTH))
+        return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_COULD_NOT_PARSE_JSON);
+    ws();
+    if (jp != je)                       /* something after the value */
+        return fail(FN_ERR_IO_ERROR, NETWORK_ERROR_COULD_NOT_PARSE_JSON);
+    json_len = n;
+    json_unit = u;
+    return FN_ERR_OK;
+}
+
+static void put(uint8_t b)
+{
+    *jout++ = b;
+}
+
+/* writes the value at jp in the FujiNet's form */
+static void emit(void)
+{
+    char c;
+    int16_t b;
+    char *num;
+    const char *lit;
+
+    ws();
+    c = *jp;
+    if (c == '"') {
+        ++jp;
+        while ((b = str_next()) >= 0)
+            put(b);
+    } else if (c == '{' || c == '[') {
+        ++jp;
+        ws();
+        if (*jp == '}' || *jp == ']') {
+            ++jp;
+            if (c == '{')
+                put('\r');              /* an empty object: the end of line alone */
+            return;
+        }
+        for (;;) {
+            if (c == '{') {             /* key EOL value */
+                ws();
+                ++jp;
+                while ((b = str_next()) >= 0)
+                    put(b);
+                put('\r');
+                ws();
+                ++jp;                   /* ':' */
+            }
+            emit();
+            ws();
+            if (*jp++ != ',')
+                return;
+        }
+    } else if (c == 't' || c == 'f' || c == 'n') {
+        jp += c == 'f' ? 5 : 4;
+        lit = c == 't' ? "TRUE" : c == 'f' ? "FALSE" : "NULL";
+        while (*lit)
+            put(*lit++);
+    } else {                            /* a number: as written, "1.50" as 1.5, "3.0" as 3 */
+        num = jout;
+        while (jp < je && ((*jp >= '0' && *jp <= '9') || *jp == '-' || *jp == '+' || *jp == '.'
+                           || *jp == 'e' || *jp == 'E'))
+            put(*jp++);
+        if (memchr(num, '.', jout - num) && !memchr(num, 'e', jout - num) && !memchr(num, 'E', jout - num)) {
+            while (jout[-1] == '0')
+                --jout;
+            if (jout[-1] == '.')
+                --jout;
+        }
+    }
+    put('\r');
+}
+
+/* jp at an object: finds the member named by the pointer segment s (n bytes, ~0 = ~, ~1 = /);
+   1 = jp at its value */
+static uint8_t member(const char *s, uint8_t n)
+{
+    uint8_t i, match, c;
+    int16_t b;
+
+    ++jp;
+    for (;;) {
+        ws();
+        if (*jp != '"')
+            return 0;                   /* '}' */
+        ++jp;
+        npend = 0;
+        for (i = 0, match = 1; (b = str_next()) >= 0;) {
+            if (i >= n) {
+                match = 0;
+                continue;
+            }
+            c = s[i++];
+            if (c == '~' && i < n)
+                c = s[i++] == '1' ? '/' : '~';
+            if (c != b)
+                match = 0;
+        }
+        ws();
+        ++jp;                           /* ':' */
+        if (match && i == n)
+            return 1;
+        skip_value(255);
+        ws();
+        if (*jp++ != ',')
+            return 0;
+    }
+}
+
+/* jp at an array: to element number n of it (decimal in s); 1 = there */
+static uint8_t element(const char *s, uint8_t n)
+{
+    uint16_t k = 0;
+    uint8_t i;
+
+    for (i = 0; i < n; ++i) {
+        if (s[i] < '0' || s[i] > '9')
+            return 0;
+        k = k * 10 + (s[i] - '0');
+    }
+    if (!n)
+        return 0;
+    ++jp;
+    ws();
+    if (*jp == ']')
+        return 0;
+    while (k--) {
+        skip_value(255);
+        ws();
+        if (*jp++ != ',')
+            return 0;
+    }
+    return 1;
+}
+
+int16_t network_json_query(const char *devicespec, const char *query, char *buffer)
+{
+    Unit *u = open_unit(devicespec);
+    const char *s;
+    uint8_t n, found = 1;
+
+    if (!u)
+        return -(int16_t)FN_ERR_IO_ERROR;
+    if (u != json_unit) {
+        fail(FN_ERR_IO_ERROR, NETWORK_ERROR_COULD_NOT_PARSE_JSON);
+        return -(int16_t)FN_ERR_IO_ERROR;
+    }
+    jp = json;
+    je = json + json_len;
+    jout = buffer;
+    npend = 0;
+    while (found && *query == '/') {    /* one segment after the other */
+        for (s = ++query, n = 0; *query && *query != '/'; ++query)
+            ++n;
+        ws();
+        if (*jp == '{')
+            found = member(s, n);
+        else if (*jp == '[')
+            found = element(s, n);
+        else
+            found = 0;
+    }
+    if (found && !*query)               /* (a query not starting with '/': not found) */
+        emit();
+    while (jout > buffer && (jout[-1] == '\r' || jout[-1] == '\n' || (uint8_t)jout[-1] == 0x9B))
+        --jout;
+    *jout = 0;
+    return (int16_t)(jout - buffer);
+}
+#endif /* FN_NO_JSON */
