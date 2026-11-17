@@ -114,7 +114,8 @@ Retro Game Battle's CPC client `RGBTCP.BIN` is 9.1 KB with `-DFN_NO_HTTP`.
 
 ## Status (2026-11-17)
 
-Development continues. Issues and ideas are welcome.
+The library covers what CPC programs need from fujinet-lib's network API: TCP client and server,
+HTTP. What is left are extras (see Open). Issues and ideas are welcome.
 
 **Done**
 - TCP client: open (host name or a.b.c.d), status, read (blocking and non-blocking), write, close,
@@ -127,15 +128,25 @@ Development continues. Issues and ideas are welcome.
 - TCP-only build (`-DFN_NO_HTTP`, about 5.5 KB smaller), used by Retro Game Battle.
 - Test program against a local test server (`make test`, both variants) - in the emulator.
 
-**Open** (roughly in the planned order)
+**Open**
 
 | | Note |
 |---|---|
 | Real CPC + M4 | everything so far runs only in the emulator (CPCSyntaxError with M4 emulation) |
-| UDP | depends on what the M4 firmware offers - to be checked |
-| TNFS | FujiNet's file protocol, runs over UDP - after UDP |
-| Translation modes, JSON | `OPEN_TRANS_*` other than NONE, FujiNet's JSON parser |
+| Translation modes, JSON | `OPEN_TRANS_*` other than NONE, FujiNet's JSON parser - no M4 limits here |
+| UDP (a plus) | not offered by the M4 as documented - see the hint below |
+| TNFS (a plus) | FujiNet's file protocol, normally over UDP - only with UDP, or if TNFS over TCP works (to be checked) |
 | HTTPS | not possible on the M4 (no TLS) - only with FujiNet hardware (see the next goal) |
+
+**Hint: UDP on the M4** (checked 2026-11-17). Duke's command documentation
+([m4info.txt](http://www.spinpoint.org/cpc/m4info.txt), updated 2024-11-27) says of `C_NETSOCKET`
+(0x4331): "Only TCP protocol for now". There is no sendto/recvfrom command, the socket table has
+no sender address for datagrams, the changelog has no UDP entry and Duke's examples
+([M4examples](https://github.com/M4Duke/M4examples)) are TCP only. CPCSyntaxError's M4 emulation
+also makes every socket TCP. Not checked: the M4's Wi-Fi firmware (not public) - an undocumented
+UDP path could be tried on a real M4 with `C_NETSOCKET` type 2, protocol 17 (connect, send, look
+for the datagram on the PC). Until then `UDP://` returns 146 (not implemented), and UDP and TNFS
+would come with FujiNet hardware for the CPC (see the next goal).
 
 ## Build and test
 
